@@ -1,0 +1,315 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Perfis de Acesso no sistema
+enum Role {
+  SUPER_ADMIN // Administrador geral do sistema
+  ADMIN       // Responsável / Pai / Mãe / Tutor (Administrador da Família)
+  DEPENDENT   // Dependente que pode ter acesso limitado (ex: criança mais velha com chat/tarefas)
+}
+
+// Nível de permissão que o Responsável possui sobre os registros da criança
+enum AccessLevel {
+  READ  // Apenas visualiza (ex: profissionais de saúde, babás, parentes distantes)
+  WRITE // Pode criar tarefas/eventos (ex: padrastos, tios próximos)
+  FULL  // Acesso total administrativo (ex: pais biológicos, guardiões legais)
+}
+
+// Tipo de parentesco ou relacionamento com a criança
+enum RelationshipType {
+  PAI
+  MAE
+  PADRASTO
+  MADRASTA
+  AVO
+  TIO
+  TUTOR_LEGAL
+  OUTRO
+}
+
+// 1. Família (Family): Agrupador Principal
+model Family {
+  id                 String     @id @default(uuid())
+  name               String     // Nome identificador da família (ex: "Família Silva Santos")
+  familyType         FamilyType @default(FAMILIA_UNICA)
+  custodyOption      String?    // Opções de guarda: "7X7", "15X15", "2X2X3", "15D_FDS", etc.
+  custodyStartAnchor DateTime?  // Data de início para a contagem da escala
+  custodyStartParent String?    // Pai ou Mãe que inicia a escala nesta data ("MAE" ou "PAI")
+  custodyWeekendStart Int?       @default(5) // Dia de início da visita (0=Dom, ..., 6=Sáb)
+  custodyWeekendEnd   Int?       @default(0) // Dia de término da visita (0=Dom, ..., 6=Sáb)
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+
+  // Relacionamentos
+  users      User[]
+  children   Child[]
+  meetings   Meeting[]
+  residences Residence[]
+  events     Event[]
+  rewards    Reward[]
+  expenses   Expense[]
+}
+
+// 2. Usuário (User): Cuidadores, Responsáveis ou SuperAdmins
+model User {
+  id           String   @id @default(uuid())
+  name         String
+  email        String   @unique
+  passwordHash String   // Senha criptografada
+  role         Role     @default(ADMIN)
+  cpf          String?  @unique // CPF (opcional no cadastro)
+  phone        String?  // Telefone (opcional no cadastro)
+  avatarUrl    String?  // Foto de perfil (URL local /uploads/)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Vinculação opcional com uma Família (pode ser nulo para SuperAdmins)
+  familyId String?
+  family   Family? @relation(fields: [familyId], references: [id], onDelete: SetNull)
+
+  // Mapeamento das crianças que este usuário é responsável (tabela intermediária)
+  guardianOf GuardianChild[]
+
+  // Perfil de dependente (caso este usuário seja uma criança com acesso)
+  childProfile Child?
+
+  // Residências associadas a este cuidador
+  residences Residence[] @relation("ResidenceCaregivers")
+
+  // Tarefas e eventos atribuídos
+  caregiverTasks  Task[]    @relation("CaregiverTasks")
+  caregiverEvents Event[]   @relation("CaregiverEvents")
+  paidExpenses    Expense[] @relation("PaidExpenses")
+}
+
+// 3. Criança/Dependente (Child): Vinculada a uma família
+model Child {
+  id        String    @id @default(uuid())
+  name      String
+  birthDate DateTime? // Data de nascimento
+  avatarUrl String?   // Foto de perfil da criança (URL local /uploads/)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  // Vinculação obrigatória com a Família
+  familyId String
+  family   Family @relation(fields: [familyId], references: [id], onDelete: Cascade)
+
+  // Mapeamento dos responsáveis por esta criança (tabela intermediária)
+  guardians GuardianChild[]
+
+  // Tarefas da criança
+  tasks     Task[]
+
+  // Link opcional para o Usuário Dependente com login
+  userId    String?   @unique
+  user      User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  // Residência fixa/principal da criança
+  primaryResidenceId String?
+  primaryResidence   Residence? @relation("PrimaryResidence", fields: [primaryResidenceId], references: [id], onDelete: SetNull)
+
+  // Eventos vinculados à criança
+  events    Event[]
+
+  // Gamificação (Novo!)
+  points      Int                @default(0)
+  redemptions RewardRedemption[]
+
+  // Documentos (Novo!)
+  documents   Document[]
+  expenses    Expense[]
+}
+
+// 4. Tabela Intermediária: Relacionamento/Permissões entre Usuários e Crianças
+// Mapeia quem cuida de qual criança, o nível de acesso e o tipo de relacionamento
+model GuardianChild {
+  id           String           @id @default(uuid())
+  userId       String
+  childId      String
+  relationship RelationshipType @default(OUTRO)
+  accessLevel  AccessLevel      @default(READ)
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  // Relações e Chaves Estrangeiras
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  child Child @relation(fields: [childId], references: [id], onDelete: Cascade)
+
+  // Garante que não haja duplicidade de relacionamento entre o mesmo Usuário e Criança
+  @@unique([userId, childId])
+}
+
+// 5. Tarefas (Task)
+model Task {
+  id          String   @id @default(uuid())
+  title       String
+  description String?
+  isCompleted Boolean  @default(false)
+  dueDate     DateTime?
+  recurrence  Recurrence @default(NONE)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Chaves estrangeiras e relações
+  childId     String?
+  child       Child?    @relation(fields: [childId], references: [id], onDelete: Cascade)
+  
+  caregiverId String?
+  caregiver   User?     @relation("CaregiverTasks", fields: [caregiverId], references: [id], onDelete: SetNull)
+  
+  points      Int       @default(10) // Pontuação para gamificação
+  
+  familyId    String
+
+  meetingId   String?
+  meeting     Meeting? @relation(fields: [meetingId], references: [id], onDelete: SetNull)
+}
+
+// 6. Recorrência das Tarefas
+enum Recurrence {
+  NONE
+  DAILY
+  WEEKLY
+  MONTHLY
+}
+
+// 7. Reuniões e Atas (Meeting)
+model Meeting {
+  id        String   @id @default(uuid())
+  title     String
+  date      DateTime
+  minutes   String?  // Ata de reunião (Markdown/Texto)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  familyId  String
+  family    Family   @relation(fields: [familyId], references: [id], onDelete: Cascade)
+
+  tasks     Task[]
+}
+
+// 8. Tipos de Arranjo Familiar
+enum FamilyType {
+  FAMILIA_UNICA
+  GUARDA_COMPARTILHADA
+  COPARENTALIDADE
+}
+
+// 9. Residências da Família (Novo!)
+model Residence {
+  id        String   @id @default(uuid())
+  name      String   // Nome identificador (ex: "Casa da Mãe", "Casa do Pai", "Casa da Vó")
+  address   String?  // Endereço físico opcional
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relacionamento com a Família
+  familyId  String
+  family    Family   @relation(fields: [familyId], references: [id], onDelete: Cascade)
+
+  // Cuidadores que moram ou estão ativos nesta residência (muitos-para-muitos implícito)
+  users     User[]   @relation("ResidenceCaregivers")
+
+  // Crianças que possuem esta residência como fixa/primária
+  primaryChildren Child[] @relation("PrimaryResidence")
+}
+
+// 10. Eventos / Compromissos (Novo!)
+model Event {
+  id          String     @id @default(uuid())
+  title       String
+  description String?
+  date        DateTime   // Data do compromisso
+  time        String?    // Horário formatado (ex: "14:30")
+  location    String?    // Local físico ou virtual
+  type        String     // Categorias: "Saúde", "Educação", "Esporte", "Lazer", "Logística", "Outro"
+  recurrence  Recurrence @default(NONE)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  // Relações obrigatórias
+  familyId    String
+  family      Family     @relation(fields: [familyId], references: [id], onDelete: Cascade)
+
+  // Relações opcionais (Múltiplas crianças e Cuidador Responsável)
+  children    Child[]
+
+  caregiverId String?
+  caregiver   User?      @relation("CaregiverEvents", fields: [caregiverId], references: [id], onDelete: SetNull)
+}
+
+// 11. Recompensas (Gamificação)
+model Reward {
+  id          String             @id @default(uuid())
+  title       String             // Nome da recompensa (ex: "Escolher o filme da noite")
+  description String?            // Descrição do prêmio
+  pointsCost  Int                // Custo em pontos (ex: 100)
+  imageUrl    String?            // URL ou dados Base64 da imagem (Novo!)
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  familyId    String
+  family      Family             @relation(fields: [familyId], references: [id], onDelete: Cascade)
+
+  redemptions RewardRedemption[]
+}
+
+// 12. Resgates de Recompensas
+model RewardRedemption {
+  id          String   @id @default(uuid())
+  pointsSpent Int      // Pontos gastos no momento do resgate
+  status      String   @default("PENDING") // PENDING, APPROVED, DELIVERED
+  createdAt   DateTime @default(now())
+
+  rewardId    String
+  reward      Reward   @relation(fields: [rewardId], references: [id], onDelete: Cascade)
+
+  childId     String
+  child       Child    @relation(fields: [childId], references: [id], onDelete: Cascade)
+}
+
+// 13. Documentos das Crianças (Novo!)
+model Document {
+  id         String   @id @default(uuid())
+  name       String   // Nome do arquivo
+  fileData   String   // Dados do arquivo (Base64)
+  category   String   // Categoria do documento (Identificação, Saúde, Educação, Financeiro, Outros)
+  size       String   // Tamanho formatado (ex: "2.4 MB")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  childId    String
+  child      Child    @relation(fields: [childId], references: [id], onDelete: Cascade)
+}
+
+// 14. Módulo de Despesas (Novo!)
+model Expense {
+  id          String     @id @default(uuid())
+  description String
+  amount      Float      // Valor da despesa
+  date        DateTime   // Data da despesa
+  expenseType String     @default("VARIABLE") // RECURRENT, VARIABLE
+  recurrence  Recurrence @default(NONE)       // NONE, DAILY, WEEKLY, MONTHLY
+  toBeSplit   Boolean    @default(true)       // Se vai dividir a despesa (50/50)
+  isPaid      Boolean    @default(false)      // Confirmado como pago (comprovante enviado)
+  receiptData String?                         // Comprovante em formato Base64
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  // Relações
+  paidById    String
+  paidBy      User       @relation("PaidExpenses", fields: [paidById], references: [id], onDelete: Cascade)
+
+  childId     String
+  child       Child      @relation(fields: [childId], references: [id], onDelete: Cascade)
+
+  familyId    String
+  family      Family     @relation(fields: [familyId], references: [id], onDelete: Cascade)
+}

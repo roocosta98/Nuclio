@@ -1,0 +1,50 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gerenciamento_web
+    restart: always
+    ports:
+      - "3000:3000"
+      - "5555:5555"
+    volumes:
+      # Sincroniza o código local com o container para suporte total a Hot Reloading (Fast Refresh)
+      - .:/app
+      # Evita que a pasta node_modules do host (Windows) sobrescreva a do container (Linux Alpine)
+      - /app/node_modules
+      # Evita conflitos de cache e permissões nos builds do Next.js (.next)
+      - /app/.next
+    environment:
+      - NODE_ENV=development
+      - NEXT_TELEMETRY_DISABLED=1
+      # String de conexão configurada para apontar para o container 'db' na porta 5432
+      - DATABASE_URL=postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@db:5432/${DB_NAME:-gerenciamento_db}?schema=public
+    env_file:
+      - .env.local
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    container_name: gerenciamento_db
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_NAME:-gerenciamento_db}
+    ports:
+      - "5433:5432" # Mapeia a porta interna 5432 do Docker para a porta 5433 do seu Windows
+    volumes:
+      # Persistência dos dados do PostgreSQL em volume local do Docker
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-gerenciamento_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
+    driver: local

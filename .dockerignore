@@ -1,0 +1,26 @@
+# Evitar enviar pastas pesadas e dependências locais para o Daemon do Docker (Otimiza o build context)
+node_modules
+.next
+out
+build
+dist
+
+# Git
+.git
+.gitignore
+
+# Configurações do Docker
+.dockerignore
+Dockerfile
+docker-compose*.yml
+
+# Logs de erros e pacotes
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Variáveis de ambiente locais (sensíveis)
+.env
+.env*.local
+.env.local
